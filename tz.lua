@@ -52,7 +52,6 @@ function load(t)
   end
 end
 
-
 function M.getoffset(t)
   if t < tstart or t >= tend then
     -- Ignore errors
@@ -68,8 +67,7 @@ function M.getoffset(t)
 end
 
 function M.gettime()
-	local t = 1576771699
-
+	local t = rtctime.get()
 
 	if t < tstart or t >= tend then
     -- Ignore errors
