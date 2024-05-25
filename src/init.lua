@@ -54,21 +54,20 @@
 ]] --
 
 local tmr = require("tmr")
-
-print("Grace period before starting...")
 tmr.create():alarm(
 	2000,
 	tmr.ALARM_SINGLE,
 	function()
+		--local memtools = require("memtools")
+		--memtools.rtcmem_dump()
+		--memtools.rtcmem_erase()
+		--memtools.rtcmem_dump()
+		--do return end
 
 		local gascounter = require("gascounter")
 		gascounter.main()
 
-		--dofile("memtools.lua")
-		--dofile("sleep.lua")
-		--dofile("i2c.lua")
-		--dofile("webapi.lua")
-		--dofile("gascounter.lua")
+		-- local timetest = require("timetest")
+		-- timetest.main()
 	end
 )
-

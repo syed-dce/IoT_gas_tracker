@@ -11,10 +11,10 @@ local sleep = require("sleep")
 local wifi = require("wifi")
 local sntp = require("sntp")
 
-local function do_post(include_data)
+local function do_post(clock_sync_only, wifi_wakeup_on)
 	local content = nil
 
-	if include_data then
+	if not clock_sync_only then
 		content = memtools.rtcmem_read_log_json()
 		print("POST payload: " .. content)
 	end
@@ -23,8 +23,7 @@ local function do_post(include_data)
 		conf.net.api_endpoint,
 		"Content-Type: application/json\r\n",
 		content,
-		function(code, response, headers)
-
+		function(code, response, _)
 			if not response then
 				response = ""
 			end
@@ -35,17 +34,21 @@ local function do_post(include_data)
 				local kv = sjson.decode(response)
 				for k, v in pairs(kv) do
 					if k == "time" then
-						rtctime.set(v, 0)
-						local tm = rtctime.epoch2cal(tz.get_local_time())
+						local sec, usec = string.match(v, "([^.]*)%.([^.]*)")
+						local old_rtc = rtctime.get()
+						rtctime.set(sec, usec)
+						local new_rtc = rtctime.get()
+						local tm = rtctime.epoch2cal(tz.get_offset(new_rtc) + new_rtc)
 						print(
 							string.format(
-								"Clock set from HTTP server: %04d/%02d/%02d %02d:%02d:%02d",
+								"Local time is now: %04d/%02d/%02d %02d:%02d:%02d (drift: %d)",
 								tm["year"],
 								tm["mon"],
 								tm["day"],
 								tm["hour"],
 								tm["min"],
-								tm["sec"]
+								tm["sec"],
+								old_rtc - new_rtc
 							)
 						)
 					end
@@ -54,12 +57,16 @@ local function do_post(include_data)
 				print("Error during POST.")
 			end
 
-			sleep.until_next_poll()
+			if clock_sync_only then
+				sleep.sleep_async(conf.time.calibration_sleep_time, wifi_wakeup_on) -- Never returns
+			else
+				sleep.until_next_poll(wifi_wakeup_on)
+			end
 		end
 	)
 end
 
-function M.do_api_call(include_data)
+function M.do_api_call(clock_sync_only, wifi_wakeup_on)
 	print("Setting up Wi-Fi connection...")
 
 	if conf.net.dns_primary_server then
@@ -76,7 +83,7 @@ function M.do_api_call(include_data)
 		tmr.ALARM_SINGLE,
 		function()
 			print("Wi-Fi connection can't be established. Giving up.")
-			sleep.until_next_poll()
+			sleep.until_next_poll(wifi_wakeup_on)
 		end
 	)
 
@@ -89,40 +96,47 @@ function M.do_api_call(include_data)
 			wifi_timeout_timer:stop()
 			if conf.net.ntp.enabled then
 				print("Attempting SNTP time sync.")
+				local old_rtc = rtctime.get()
 				sntp.sync(
 					conf.net.ntp.server,
-					function(sec, usec, server, info)
-						rtctime.set(sec, usec)
-						local tm = rtctime.epoch2cal(tz.get_local_time())
+					function(_, _, server, _)
+						print(string.format("SNTP server: %s", server))
+						local new_rtc = rtctime.get()
+						local tm = rtctime.epoch2cal(tz.get_offset(new_rtc) + new_rtc)
 						print(
 							string.format(
-								"Clock set from SNTP server %s: %04d/%02d/%02d %02d:%02d:%02d",
-								server,
+								"Local time is now: %04d/%02d/%02d %02d:%02d:%02d (drift: %d)",
 								tm["year"],
 								tm["mon"],
 								tm["day"],
 								tm["hour"],
 								tm["min"],
-								tm["sec"]
+								tm["sec"],
+								old_rtc - new_rtc
 							)
 						)
 
-						if include_data then
-							do_post(include_data)
+						if clock_sync_only then
+							print("No need to POST, clock synced through SNTP.")
+							sleep.sleep_async(conf.time.calibration_sleep_time, wifi_wakeup_on) -- Never returns
 						else
-							sleep.until_next_poll()
+							do_post(false, wifi_wakeup_on) -- Never returns
 						end
 					end,
-					function(reason, info)
+					function(reason, _)
 						print("SNTP sync failed: " .. tostring(reason) .. ". Giving up.")
-						sleep.until_next_poll()
+						sleep.until_next_poll(true) -- Never returns
 					end
 				)
 			else
-				do_post(include_data)
+				do_post(clock_sync_only, wifi_wakeup_on) -- Never returns
 			end
 		end
 	)
+
+	do
+		return
+	end
 end
 
 return M
