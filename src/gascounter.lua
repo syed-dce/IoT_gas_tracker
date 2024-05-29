@@ -4,19 +4,38 @@ return function()
 	local conf = require("conf")
 	local tz = require("tz")
 	local sleep = require("sleep")
+	local log = require("log")
 
 	if not tz.setzone(conf.time.timezone) then
-		print(string.format("Can'time_cal find %s timezone file. Halting.", conf.time.timezone))
+		log(string.format("Can'time_cal find %s timezone file. Halting.", conf.time.timezone))
 		do
 			return
 		end
 	end
 
+	--  Safety timer to avoid draining batteries if execution gets stuck
+	local tmr = require("tmr")
+	tmr.create():alarm(
+		60000,
+		tmr.ALARM_SINGLE,
+		function()
+			log(string.format("Safety timer triggered! Sleeping 1h, Wi-Fi on on resume."))
+			tmr.create():alarm(
+				1000,
+				tmr.ALARM_SINGLE,
+				function()
+					local rtctime = require("rtctime")
+					rtctime.dsleep(1000000 * 3600, 0) -- Wi-Fi on
+				end
+			)
+		end
+	)
+
 	local _, bootreason = node.bootreason()
 	local time = tz.get_local_time()
 	local second_of_day = tz.get_second_of_day(time)
 
-	print(
+	log(
 		string.format(
 			"GasCounter started - Boot reason: %s - Local time is %s (tz: %s) - Seconds past midnight: %d",
 			tostring(bootreason),
@@ -33,21 +52,23 @@ return function()
 
 	if clock_calibration_status < conf.time.calibration_cycles then
 		clock_calibration_status = clock_calibration_status + 1
-		print(string.format("Clock calibration cycle: %d out of %d", clock_calibration_status, conf.time.calibration_cycles))
+		log(string.format("Clock calibration cycle: %d out of %d", clock_calibration_status, conf.time.calibration_cycles))
 
 		-- Sleep until o'clock and align Tiny when waking up
 		if clock_calibration_status == conf.time.calibration_cycles then
+			memtools._unload()
 			memtools = nil
 			local webapi = require("webapi")
 			webapi.server_sync(
 				false,
-				function(sync_result, ota_update)
+				function(sync_result, _)
 					if sync_result then
 						memtools = require("memtools")
 						memtools.rtcmem_set_clock_calibration_status(clock_calibration_status)
+						memtools._unload()
 						memtools = nil
 					else
-						print("Error during time synchronization.")
+						log("Error during time synchronization.")
 					end
 					sleep.oclock()
 				end
@@ -56,19 +77,21 @@ return function()
 				return
 			end
 		else -- Sleep for the clock calibration interval
+			memtools._unload()
 			memtools = nil
 			local webapi = require("webapi")
 			webapi.server_sync(
 				false,
-				function(sync_result, ota_update)
+				function(sync_result, _)
 					if sync_result then
 						memtools = require("memtools")
 						memtools.rtcmem_set_clock_calibration_status(clock_calibration_status)
+						memtools._unload()
 						memtools = nil
 					else
-						print("Error during time synchronization.")
+						log("Error during time synchronization.")
 					end
-					sleep.seconds(conf.time.calibration_sleep_time)
+					sleep.seconds(conf.time.calibration_sleep_time, true)
 				end
 			)
 			do
@@ -77,12 +100,12 @@ return function()
 		end
 	else
 		if clock_calibration_status == conf.time.calibration_cycles then
-			print("Syncing cycle with TINY after clock calibration")
+			log("Syncing cycle with TINY after clock calibration")
 			memtools.tiny2rtc()
 			clock_calibration_status = clock_calibration_status + 1
 			memtools.rtcmem_set_clock_calibration_status(clock_calibration_status)
 		else
-			print("Not in clock calibration mode.")
+			log("Not in clock calibration mode.")
 		end
 	end
 
@@ -90,20 +113,45 @@ return function()
 	if second_of_day > ((24 * 3600) - conf.time.drift_margin) or second_of_day < conf.time.drift_margin then
 		memtools.tiny2rtc(7)
 
+		-- log("Writing test data in slots")
+		-- local y = 0
+		-- local sum = 0
+		-- for i = 0, 7 do -- 8 Slots, 3 hour each = 24h...
+		-- 	local data32 = {}
+		-- 	local checksum = 64
+		-- 	for j = 1, 9 do -- ...each has 10 32-bit integers...
+		-- 		y = 128
+		-- 		data32[j] = memtools.int8_to_32(y, y + 1, y + 2, y + 3)
+		-- 		sum = sum + y + (y + 1) + (y + 2) + (y + 3)
+		-- 		checksum = checksum + y + (y + 1) + (y + 2) + (y + 3)
+		-- 		--y = (y + 4) % 256
+		-- 	end
+
+		-- 	-- Last byte of slot contains the checksum
+		-- 	checksum = checksum + y + (y + 1) + (y + 2)
+		-- 	data32[10] = memtools.int8_to_32(y, y + 1, y + 2, checksum % 256)
+		-- 	sum = sum + y + (y + 1) + (y + 2) + (checksum % 256)
+
+		-- 	memtools.rtcmem_write_log_slot(i, data32)
+		-- 	tmr.wdclr()
+		-- end
+
 		local content = memtools.rtcmem_read_log_json()
+		memtools._unload()
 		memtools = nil
 
 		local webapi = require("webapi")
 		webapi.server_sync(
 			content,
-			function(sync_result, ota_update)
+			function(sync_result, _)
 				if sync_result then
-					print("Content posted, clearing RTC")
+					log("Content posted, clearing RTC")
 					memtools = require("memtools")
 					memtools.rtcmem_clear_log()
+					memtools._unload()
 					memtools = nil
 				else
-					print("Error during POST") --TODO repost after a delay maybe or store to fs?
+					log("Error during POST") --TODO repost after a delay maybe or store to fs?
 				end
 				sleep.oclock()
 			end
@@ -118,7 +166,7 @@ return function()
 	local s = 0
 	for hour = 3, 21, 3 do
 		if math.abs((hour * 3600) - second_of_day) <= conf.time.drift_margin then
-			print(string.format("Collecting data for slot %d", s))
+			log(string.format("Collecting data for slot %d", s))
 			memtools.tiny2rtc(s)
 			break
 		end
@@ -131,4 +179,3 @@ return function()
 		return
 	end
 end
-
