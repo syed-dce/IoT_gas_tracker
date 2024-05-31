@@ -1,12 +1,9 @@
 #include "twi.h"
 
-uint8_t output_buffer_read_index;
-
 /* Initialize twi slave mode */
 void twi_slave_init(void) {
     SET_SDA();
     TWI_INT_INIT();
-    TWEA = 1;
     TWSR = I2C_IDLE;
 }
 
@@ -29,25 +26,24 @@ ISR(PCINT0_vect) {
 
         // Own SLA_R has been received, ACK has been returned
         case TWI_SLA_REQ_R_ACK_RTD:
-            output_buffer_read_index = 0;
-            TWDR = output_buffer[output_buffer_read_index];
-            output_buffer[output_buffer_read_index] = 0;
-            output_buffer_read_index++;
-            TWEA = 1;
+            i2c_buffer_idx = 0;
+            TWDR = i2c_buffer[0];
+            i2c_buffer_idx++;
             send_data();
             goto START;
             break;
 
             // data has been transmitted, ACK has been received.
         case TWI_SLA_DATA_SND_ACK_RCV:
-            if (output_buffer_read_index < MAX_READ_SIZE) {
-                TWDR = output_buffer[output_buffer_read_index];
-                output_buffer[output_buffer_read_index] = 0;
-                output_buffer_read_index++;
+            if (i2c_buffer_idx < I2C_BUFFER_SIZE) {
+                TWDR = i2c_buffer[i2c_buffer_idx];
+                i2c_buffer[0] += i2c_buffer[i2c_buffer_idx]; //checksum
+                i2c_buffer[i2c_buffer_idx] = 0;
+                i2c_buffer_idx++;
             } else {
-                TWDR = 255;
+                TWDR = i2c_buffer[0] + 64;
+                i2c_buffer[0] = 0;
             }
-            TWEA = 1;
             send_data();
             goto START;
             break;
@@ -60,7 +56,6 @@ ISR(PCINT0_vect) {
 
             // met stop or repeat start
         case TWI_SLA_STOP:
-            TWEA = 1;
             TWSR = I2C_IDLE;
             break;
 
@@ -71,7 +66,6 @@ ISR(PCINT0_vect) {
             // Idle or bus error
         case I2C_IDLE:
         default:
-            TWEA = 1;
             break;
     }
 
@@ -88,7 +82,7 @@ inline uint8_t read_byte(void) {
     // Let SCL go low first. MCU comes here while SCL is still high
     while (GET_SCL());
 
-    //R ead 8 bits from master, respond with ACK. SCL could be high or low depending on CPU speed
+    //Read 8 bits from master, respond with ACK. SCL could be high or low depending on CPU speed
     for (uint8_t index = 0; index < 8; index++) {
 
         while (!GET_SCL());
@@ -123,7 +117,7 @@ inline uint8_t read_byte(void) {
 }
 
 /* TWI slave send data */
-void send_data(void) {
+inline void send_data(void) {
     for (uint8_t index = 0; index < 8; index++) {
         while (GET_SCL());
         if ((TWDR >> (7 - index)) & 1)
@@ -148,7 +142,7 @@ void send_data(void) {
 }
 
 /* Identify start condition */
-void get_start_condition(void) {
+inline void get_start_condition(void) {
     uint8_t retval = 0;
 
     // Make sure it is the start by checking SCL high when SDA goes low

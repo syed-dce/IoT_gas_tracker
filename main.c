@@ -4,10 +4,10 @@
 #include "main.h"
 #include "twi.h"
 
-_Static_assert(sizeof(pulse_log_t) == MAX_READ_SIZE, "pulse_log_t must be MAX_READ_SIZE size");
+_Static_assert(sizeof(pulse_log_t) == I2C_BUFFER_SIZE, "pulse_log_t size must be equal to I2C_BUFFER_SIZE");
 
-extern volatile uint8_t output_buffer[];
-volatile uint8_t wd_triggered = 0;
+extern volatile uint8_t i2c_buffer[];
+volatile uint8_t flags;
 
 void readVccVoltage(uint8_t *vcc) {
 
@@ -29,23 +29,19 @@ void readVccVoltage(uint8_t *vcc) {
 
 }
 
-/* Watchdog service routine called at about @2Hz*/
+/* Watchdog service routine called at about @1Hz*/
 ISR(WDT_vect) {
-    wd_triggered = 1;
+    sbi(flags, FL_WD_TRIGGERED);
 }
 
 int main(void) {
 
-    pulse_log_t *pulse_log = (pulse_log_t*) &output_buffer;
-    uint8_t sensor_output_prev = 0;
-
+    pulse_log_t *pulse_log = (pulse_log_t*) &i2c_buffer;
     pulse_log->ticks = 0;
-    for (uint8_t i = 0; i < LOG_FRAMES; i++) {
-        pulse_log->frames[i] = 0;
-    }
+    uint8_t frame = 0;
 
     // Watchdog prescaler @1Hz
-    WDTCR |= (1 << WDP2) | (1 << WDP1);
+    WDTCR |= (1 << WDP2) | (1 << WDP1) | (0 << WDP0) ;
 
     // Enable watchdog
     WDTCR |= (1 << WDTIE);
@@ -56,6 +52,8 @@ int main(void) {
     twi_slave_init();
     twi_slave_enable();
 
+    // Let VCC settle
+    _delay_us(1000000);
     readVccVoltage(&pulse_log->vcc);
 
     set_sleep_mode(SLEEP_MODE_PWR_DOWN);
@@ -65,51 +63,44 @@ int main(void) {
         sleep_cpu();
         sleep_disable();
 
-        // System woken up by I2C?
-        if (!wd_triggered)
+        // Not woken up by watchdog but by I2C
+        if (!rbi(flags, FL_WD_TRIGGERED))
             continue;
 
-        wd_triggered = 0;
+        cbi(flags, FL_WD_TRIGGERED);
 
-        // Log space is exhausted?
-        if (pulse_log->ticks < LOG_HOURS * 60 * 60) {
+        // Woke up after 1 second
+        pulse_log->ticks++;
 
-            pulse_log->ticks++;
-
-            // Samples VCC 5 minutes before timeout
-            if (pulse_log->ticks == LOG_HOURS * 60 * 55) {
-                readVccVoltage(&pulse_log->vcc);
-            }
-
-            // Turn-on sensor
-            sbi(CONTROL_PORT, SENSOR_VCC_PIN);
-
-            // Wait for sensor to settle
-            _delay_us(500);
-
-            // Check magnetic field
-            if (!rbi(CONTROL_PORT_PINS, SENSOR_PIN)) {
-
-                // Check if pulse not already accounted
-                if (!sensor_output_prev) {
-                    pulse_log->frames[pulse_log->ticks / 60 * LOG_FRAME_MINUTES]++;
-                }
-
-                sensor_output_prev = 1;
-
-            } else {
-                sensor_output_prev = 0;
-            }
-
-            // Turn-off sensor
-            cbi(CONTROL_PORT, SENSOR_VCC_PIN);
-
+        frame = (pulse_log->ticks + (LOG_FRAME_MINUTES * 60) - 1) / (LOG_FRAME_MINUTES * 60) - 1;
+        if (frame >= LOG_FRAMES) {
+            frame = LOG_FRAMES - 1;
         }
 
-        // Calculate checksum
-        pulse_log->checksum = 64;
-        for (uint8_t i = 1; i < MAX_READ_SIZE; i++) {
-            pulse_log->checksum += output_buffer[i];
+        // Turn-on sensor
+        sbi(CONTROL_PORT, SENSOR_VCC_PIN);
+
+        // Wait for sensor to settle
+        _delay_us(500);
+
+        // Detect magnetic field
+        if (!rbi(CONTROL_PORT_PINS, SENSOR_PIN)) {
+            // Check if pulse not already accounted
+            if (!rbi(flags, FL_PREV_SENSOR_VAL)) {
+                pulse_log->frames[frame]++;
+            }
+            sbi(flags, FL_PREV_SENSOR_VAL);
+        } else {
+            cbi(flags, FL_PREV_SENSOR_VAL);
         }
+
+        // Turn-off sensor
+        cbi(CONTROL_PORT, SENSOR_VCC_PIN);
+
+        // Samples VCC 5 minutes before timeout
+        if (pulse_log->ticks == LOG_HOURS * 60 * 55) {
+            readVccVoltage(&pulse_log->vcc);
+        }
+
     }
 }
